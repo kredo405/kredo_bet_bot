@@ -1,0 +1,787 @@
+const fs = require('fs/promises');
+const path = require('path');
+
+const { getPrediction } = require('../services/llm');
+const { getMatchesFromApi, getOddsHistoryFromApi, getEventPageData, getSofascoreMatches, getSofascoreLineups, getSofascorePregameForm, getStatshubEvents, getStatshubTeamPerformance, getTeamTournaments, getStatshubPlayerPerformance } = require('../services/api');
+const { getTimestampForDate, getFbrefDateString, getStartOfDayTimestampSeconds, getEndOfDayTimestampSeconds } = require('../utils/dates');
+const { generateFinalPrompt } = require('./prompt');
+const { calculateOutcomeProbabilities } = require('../utils/poisson');
+const { oddsData } = require('../services/database');
+
+
+const setupHandlers = (bot, conversationState) => {
+    // This helper function contains the logic that runs after tournament selection is complete.
+    const continueFetchingData = async (chatId, state) => {
+        try {
+            await bot.sendMessage(chatId, "▶️ Запрос статистики производительности команд с Statshub...");
+            const { homeTeam, awayTeam } = state.statshubMatchInfo;
+            const homeTournamentId = state.selectedHomeTournamentId;
+            const awayTournamentId = state.selectedAwayTournamentId;
+
+            const processPerformanceData = (performanceData) => {
+                if (!performanceData || !performanceData.data) return [];
+                return performanceData.data.slice(0, 7).map(el => ({ // Changed slice to 7
+                    eventId: el.event.id, // Save the eventId
+                    homeTeam: el.homeTeam.name, awayTeam: el.awayTeam.name, scoreHome: el.event.score.home, scoreAway: el.event.score.away,
+                    statistics: {
+                        expectedGoals: el.statistics.expectedGoals, bigChanceCreated: el.statistics.bigChanceCreated, bigChanceMissed: el.statistics.bigChanceMissed,
+                        bigChanceScored: el.statistics.bigChanceScored, totalShotsInsideBox: el.statistics.totalShotsInsideBox, totalShotsOutsideBox: el.statistics.totalShotsOutsideBox,
+                        touchesInOppBox: el.statistics.touchesInOppBox, finalThirdEntries: el.statistics.finalThirdEntries, goalsPrevented: el.statistics.goalsPrevented,
+                        ballPossession: el.statistics.ballPossession, aerialDuelsPercentage: el.statistics.aerialDuelsPercentage, duelWonPercent: el.statistics.duelWonPercent,
+                        interceptionWon: el.statistics.interceptionWon, totalTackle: el.statistics.totalTackle, wonTacklePercent: el.statistics.wonTacklePercent,
+                        pass_accuracy: el.statistics.pass_accuracy, accuratePasses: el.statistics.accuratePasses, errorsLeadToGoal: el.statistics.errorsLeadToGoal
+                    },
+                    opponentStatistics: {
+                        expectedGoals: el.opponentStatistics.expectedGoals, bigChanceCreated: el.opponentStatistics.bigChanceCreated, bigChanceMissed: el.opponentStatistics.bigChanceMissed,
+                        bigChanceScored: el.opponentStatistics.bigChanceScored, totalShotsInsideBox: el.opponentStatistics.totalShotsInsideBox, totalShotsOutsideBox: el.opponentStatistics.totalShotsOutsideBox,
+                        touchesInOppBox: el.opponentStatistics.touchesInOppBox, finalThirdEntries: el.opponentStatistics.finalThirdEntries, goalsPrevented: el.opponentStatistics.goalsPrevented,
+                        ballPossession: el.opponentStatistics.ballPossession, aerialDuelsPercentage: el.opponentStatistics.aerialDuelsPercentage, duelWonPercent: el.opponentStatistics.duelWonPercent,
+                        interceptionWon: el.opponentStatistics.interceptionWon, totalTackle: el.opponentStatistics.totalTackle, wonTacklePercent: el.opponentStatistics.wonTacklePercent,
+                        pass_accuracy: el.opponentStatistics.pass_accuracy, errorsLeadToGoal: el.opponentStatistics.errorsLeadToGoal
+                    }
+                }));
+            };
+
+            const homePerformanceData = await getStatshubTeamPerformance(homeTeam.id, homeTournamentId);
+            const awayPerformanceData = await getStatshubTeamPerformance(awayTeam.id, awayTournamentId);
+            state.statshubHomePerformance = processPerformanceData(homePerformanceData);
+            state.statshubAwayPerformance = processPerformanceData(awayPerformanceData);
+            await bot.sendMessage(chatId, "✅ Успешно! Статистика производительности команд получена.");
+
+            // --- POISSON PROBABILITY CALCULATION ---
+            await bot.sendMessage(chatId, "▶️ Расчет вероятностей исходов по модели Пуассона...");
+            try {
+                const homePerf = state.statshubHomePerformance;
+                const awayPerf = state.statshubAwayPerformance;
+
+                if (!homePerf || homePerf.length === 0 || !awayPerf || awayPerf.length === 0) {
+                    throw new Error("Недостаточно данных о производительности команд для расчета Пуассона.");
+                }
+
+                const homeTeamStats = {
+                    home_xg_for: homePerf.reduce((sum, game) => sum + (parseFloat(game.statistics.expectedGoals) || 0), 0),
+                    home_xg_against: homePerf.reduce((sum, game) => sum + (parseFloat(game.opponentStatistics.expectedGoals) || 0), 0),
+                    home_games: homePerf.length
+                };
+
+                const awayTeamStats = {
+                    away_xg_for: awayPerf.reduce((sum, game) => sum + (parseFloat(game.statistics.expectedGoals) || 0), 0),
+                    away_xg_against: awayPerf.reduce((sum, game) => sum + (parseFloat(game.opponentStatistics.expectedGoals) || 0), 0),
+                    away_games: awayPerf.length
+                };
+
+                console.log("--- Poisson Inputs ---", { homeTeamStats, awayTeamStats });
+
+                const marketProbabilities = calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, oddsData);
+
+                console.log("--- Poisson Output ---", marketProbabilities);
+
+                state.poissonProbabilities = marketProbabilities;
+                await bot.sendMessage(chatId, "✅ Успешно! Вероятности по Пуассону рассчитаны.");
+
+            } catch (e) {
+                console.error("Ошибка при расчете вероятностей по Пуассону:", e);
+                await bot.sendMessage(chatId, `⚠️ Произошла ошибка при расчете вероятностей по Пуассону: ${e.message}`);
+                state.poissonProbabilities = {}; // Ensure it's an empty object on failure
+            }
+            // --- END POISSON CALCULATION ---
+
+
+            // --- NEW PLAYER PERFORMANCE LOGIC ---
+            try {
+                await bot.sendMessage(chatId, "▶️ Запрос детальной статистики игроков с Statshub...");
+                const fixtureId = state.selectedMatch.eventId;
+
+                const [homePlayerPerf, awayPlayerPerf] = await Promise.all([
+                    getStatshubPlayerPerformance(homeTeam.id, homeTournamentId, fixtureId),
+                    getStatshubPlayerPerformance(awayTeam.id, awayTournamentId, fixtureId)
+                ]);
+
+                console.log(homePlayerPerf)
+
+                const processPlayerData = (playerData) => {
+                    if (!playerData || !playerData.data || !playerData.events || playerData.events.length === 0) {
+                        return [];
+                    }
+
+                    const recentMatchIds = playerData.events
+                        .filter(event => event.events && event.events.id && event.events.timeStartTimestamp)
+                        .map(event => ({ id: event.events.id, timestamp: event.events.timeStartTimestamp }))
+                        .sort((a, b) => b.timestamp - a.timestamp)
+                        .slice(0, 5)
+                        .map(event => String(event.id));
+
+                    const recentMatchIdsSet = new Set(recentMatchIds);
+
+                    return playerData.data.map(player => {
+                        const playerStatsByFixture = player.stats || {};
+
+                        const summedStats = {};
+                        let gamesPlayed = 0;
+
+                        const forwardStats = ["expectedGoals", "npExpectedGoals", "expectedAssists", "keyPass", "shots", "onTargetScoringAttempt", "accuratePass", "totalPass", "touches", "possessionLostCtrl", "dispossessed", "xGxA", "rating", "minutesPlayed"];
+                        const defenderStats = ["accurateLongBalls", "keyPass", "accuratePass", "possessionLostCtrl", "dispossessed", "totalTackle", "interceptionWon", "totalClearance", "blockedScoringAttempt", "aerialWon", "duelWon", "xGxA", "rating", "minutesPlayed"];
+                        const goalieStats = ["rating", "minutesPlayed", "saves", "accurateLongBalls"];
+
+                        let statsToProcess = [];
+                        if (player.position === 'M' || player.position === 'F') {
+                            statsToProcess = forwardStats;
+                        } else if (player.position === 'D') {
+                            statsToProcess = defenderStats;
+                        } else if (player.position === 'G') {
+                            statsToProcess = goalieStats;
+                        }
+
+                        recentMatchIdsSet.forEach(matchId => {
+                            if (playerStatsByFixture[matchId]) {
+                                gamesPlayed++;
+                                const matchStats = playerStatsByFixture[matchId];
+
+                                statsToProcess.forEach(statName => {
+                                    if (matchStats[statName] !== undefined && matchStats[statName] !== null) {
+                                        if (!summedStats[statName]) {
+                                            summedStats[statName] = 0;
+                                        }
+                                        summedStats[statName] += parseFloat(matchStats[statName]);
+                                    }
+                                });
+                            }
+                        });
+
+                        const averagedStats = {};
+                        if (gamesPlayed > 0) {
+                            for (const statName in summedStats) {
+                                averagedStats[statName] = (summedStats[statName] / gamesPlayed).toFixed(2);
+                            }
+                        }
+
+                        return {
+                            name: player.name,
+                            position: player.position,
+                            gamesPlayedInLast5: gamesPlayed,
+                            statistics: averagedStats,
+                        };
+                    });
+                };
+
+                const processedHomePlayers = processPlayerData(homePlayerPerf);
+                const processedAwayPlayers = processPlayerData(awayPlayerPerf);
+
+                // Save processed player data to state
+                state.processedHomePlayers = processedHomePlayers;
+                state.processedAwayPlayers = processedAwayPlayers;
+
+                await bot.sendMessage(chatId, "✅ Успешно! Детальная статистика игроков посчитана и выведена в консоль.");
+
+            } catch (e) {
+                console.error("Ошибка при запросе или обработке детальной статистики игроков:", e);
+                await bot.sendMessage(chatId, "⚠️ Произошла ошибка при получении детальной статистики игроков.");
+            }
+            // --- END NEW PLAYER PERFORMANCE LOGIC ---
+
+            const { dayOffset, match: matchTitle } = state;
+            const apiTimestamp = getTimestampForDate(dayOffset);
+            await bot.sendMessage(chatId, "▶️ Запрос матчей из API nb-bet...");
+            const apiMatches = await getMatchesFromApi(apiTimestamp);
+
+            if (!apiMatches || !apiMatches.data || !apiMatches.data.leagues) {
+                throw new Error("Не удалось получить данные о матчах из API nb-bet или структура данных неверна.");
+            }
+            await bot.sendMessage(chatId, "✅ Матчи из API nb-bet получены.");
+
+            const transformedLeagues = apiMatches.data.leagues.map(el => ({
+                league: el['3'], country: el["1"], matches: el["4"].map(item => ({ link: item["3"], homeTeam: item["7"], awayTeam: item["15"] }))
+            }));
+            const allowedLeagues = new Set(['Лига Чемпионов', 'Чемпионшип', 'Премьер-Лига', 'Бундеслига', 'Примера', 'Серия А', 'Эредивизи', 'Примейра', 'Лига 1', 'Лига Европы', 'Лига Конференций']);
+            const filteredLeagues = transformedLeagues.filter(l => allowedLeagues.has(l.league));
+
+            const prompt = `
+    Вот JSON с футбольными матчами. Поле 'link' содержит готовый для URL путь.
+    \`\`\`json
+    ${JSON.stringify(filteredLeagues, null, 2)}
+    \`\`\`
+    Тебе нужно найти один матч из JSON, который семантически соответствует английскому названию: "${matchTitle}".
+    В JSON предоставлены матчи с русскими названиями команд. Тебе нужно сопоставить английские и русские названия. Например, "FC Bayern München" из 'matchTitle' соответствует "Бавария Мюнхен" в JSON.
+    
+    Твоя задача — вернуть **точное, неизменённое** значение из поля 'link' найденного матча.
+    **КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:**
+    1. Твой ответ ДОЛЖЕН быть ТОЛЬКО значением из поля 'link', начиная с '/'.
+    2. **ЗАПРЕЩЕНО** добавлять любые объяснения или форматирование.
+    Если матч не найден, твой ответ должен быть ТОЧНО таким: матч_не_найден`;
+
+            await bot.sendMessage(chatId, "▶️ ИИ ищет ссылку на матч в nb-bet.com...");
+            const link = await getPrediction(prompt); const cleanedLink = link.replace(/```/g, '').trim();
+
+            let finalLink = cleanedLink;
+            if (!finalLink.startsWith('/') && /^[0-9]/.test(finalLink)) {
+                finalLink = `/LiveEvents/${finalLink}`;
+            }
+
+            if (finalLink !== 'матч_не_найден' && finalLink.startsWith('/')) {
+                await bot.sendMessage(chatId, `✅ ИИ успешно нашел ссылку на матч в nb-bet.com.`);
+                await bot.sendMessage(chatId, `✅ Шаг 2/4: Ссылка на nb-bet найдена: https://nb-bet.com${finalLink}`);
+                const matchId = finalLink.replace('/LiveEvents/', '');
+
+                await bot.sendMessage(chatId, "▶️ Запрос истории коэффициентов из nb-bet...");
+                const oddsHistoryData = await getOddsHistoryFromApi(matchId);
+                if (oddsHistoryData && oddsHistoryData.data) {
+                    state.rawOddsHistory = oddsHistoryData.data;
+                    await bot.sendMessage(chatId, `✅ Успешно! История коэффициентов получена.`);
+                } else {
+                    await bot.sendMessage(chatId, `⚠️ Не удалось получить историю коэффициентов из nb-bet.`);
+                }
+
+                await bot.sendMessage(chatId, "▶️ Запрос дополнительных данных (погода, факты) из nb-bet...");
+                const eventPageData = await getEventPageData(matchId);
+                if (eventPageData && eventPageData.data && eventPageData.data.match) {
+                    const matchData = eventPageData.data.match;
+                    if (matchData["18"]) state.weather = { temp: matchData["18"]["3"], condition: matchData["18"]["4"] };
+                    const factsRaw = matchData["27"] ? matchData["27"]["3"] : [];
+                    if (factsRaw.length > 0) {
+                        const cleanedFacts = factsRaw.map(factObj => factObj["1"].replace(/<strong>/g, '').replace(/<\/strong>/g, ''));
+                        
+                        await bot.sendMessage(chatId, "▶️ ИИ анализирует и обрабатывает факты...");
+
+                        const factsProcessingPrompt = `
+Ты — опытный спортивный аналитик. Твоя задача — проанализировать сырые факты о предстоящем футбольном матче, выбрать **только самые основные и важные**, и изложить их максимально кратко и емко. Сосредоточься на информации, которая критически важна для принятия решения о ставке. Убери "воду", перефразируй для максимальной полезности. Сохраняй нейтральный и объективный тон. Каждый факт должен быть представлен как элемент маркированного списка.
+
+Вот сырые факты:
+"""
+${cleanedFacts.join('\n')}
+"""
+
+Твой результат должен быть единым текстом, где каждый обработанный факт начинается с "- ". Ответ должен содержать только обработанные факты и ничего больше.
+`;
+                        
+                        const processedFactsText = await getPrediction(factsProcessingPrompt);
+                        state.processedFacts = processedFactsText.trim();
+                        
+                        await bot.sendMessage(chatId, "✅ Факты успешно обработаны ИИ.");
+                    }
+                    const h2hRaw = matchData["27"] && matchData["27"]["7"] ? matchData["27"]["7"] : [];
+                    if (h2hRaw.length > 0) {
+                        state.h2hData = h2hRaw.map(el => ({ homeTeam: el["7"], homeGoals: el["10"], awayTeam: el["15"], awayGoals: el["18"] }));
+                        console.log(state.h2hData)
+                    }
+                    await bot.sendMessage(chatId, `✅ Успешно! Доп. данные (погода, факты, H2H) получены.`);
+                } else {
+                    await bot.sendMessage(chatId, `⚠️ Не удалось получить дополнительные данные из nb-bet.`);
+                }
+            } else {
+                let errorMessage = `⚠️ ИИ не смог найти ссылку на матч в nb-bet.com.`;
+                if (finalLink === 'матч_не_найден') errorMessage += ` Модель вернула: "матч_не_найден".`;
+                else if (!finalLink.startsWith('/')) errorMessage += ` Модель вернула неформатированную ссылку: "${finalLink}".`;
+                await bot.sendMessage(chatId, errorMessage);
+            }
+
+            const sofascoreDateString = getFbrefDateString(dayOffset);
+            await bot.sendMessage(chatId, `▶️ Запрос матчей с Sofascore...`);
+            const sofascoreMatches = await getSofascoreMatches(sofascoreDateString);
+            if (sofascoreMatches && sofascoreMatches.length > 0) {
+                await bot.sendMessage(chatId, "▶️ ИИ ищет ID матча в Sofascore...");
+                const idPrompt = `
+    Вот JSON массив футбольных матчей из Sofascore:
+    \`\`\`json
+    ${JSON.stringify(sofascoreMatches, null, 2)}
+    \`\`\`
+    Мне нужно, чтобы ты нашел матч, который соответствует этому названию: "${matchTitle}".
+    Твоя задача — вернуть ТОЛЬКО значение поля 'id' для наиболее вероятного совпадения. Без объяснений и форматирования.
+    Если не можешь найти совпадение, верни строку "id_not_found".`;
+                const id = (await getPrediction(idPrompt)).trim();
+                if (id && id !== 'id_not_found') {
+                    await bot.sendMessage(chatId, `✅ ИИ успешно нашел ID матча в Sofascore: ${id}`);
+                    state.sofascoreId = id;
+                    await bot.sendMessage(chatId, "▶️ Запрос данных о составах с Sofascore...");
+                    const lineupsData = await getSofascoreLineups(id);
+                    if (lineupsData) {
+                        const processMissing = p => ({
+                            type: p.type,
+                            description: p.description,
+                            player: p.player.name,
+                            expectedEndDate: p.expectedEndDate,
+                            marketValue: p.player.proposedMarketValueRaw?.value,
+                            marketValueCurrency: p.player.proposedMarketValueRaw?.currency
+                        });
+                        const processSquad = p => ({
+                            avgRating: p.avgRating,
+                            position: p.position,
+                            player: p.player.name,
+                            marketValue: p.player.proposedMarketValueRaw?.value,
+                            marketValueCurrency: p.player.proposedMarketValueRaw?.currency
+                        });
+                        state.sofascoreLineups = {
+                            home: { formation: lineupsData.home?.formation, missingPlayers: (lineupsData.home?.missingPlayers || []).map(processMissing), squad: (lineupsData.home?.players || []).map(processSquad) },
+                            away: { formation: lineupsData.away?.formation, missingPlayers: (lineupsData.away?.missingPlayers || []).map(processMissing), squad: (lineupsData.away?.players || []).map(processSquad) }
+                        };
+                        await bot.sendMessage(chatId, "✅ Успешно! Данные о составах Sofascore получены.");
+
+                        // Fetch pregame form data
+                        await bot.sendMessage(chatId, "▶️ Запрос данных о форме команд с Sofascore...");
+                        const pregameFormData = await getSofascorePregameForm(id);
+                        if (pregameFormData) {
+                            state.sofascorePregameForm = pregameFormData;
+                            await bot.sendMessage(chatId, "✅ Успешно! Данные о форме команд получены.");
+                        } else {
+                            await bot.sendMessage(chatId, "⚠️ Не удалось получить данные о форме команд с Sofascore.");
+                        }
+                    } else {
+                        await bot.sendMessage(chatId, `⚠️ Не удалось получить данные о составах с Sofascore.`);
+                    }
+                } else {
+                    await bot.sendMessage(chatId, `⚠️ ИИ не смог найти ID для матча на Sofascore.`);
+                }
+            } else {
+                await bot.sendMessage(chatId, `⚠️ Не удалось получить список матчей с Sofascore для поиска ID.`);
+            }
+
+            state.homeData = {}; state.awayData = {};
+
+            await bot.sendMessage(chatId, `✅ Шаг 4/4: Сбор данных завершен.`);
+            state.state = 'awaiting_prompt_type';
+            conversationState.set(chatId, state);
+
+            bot.sendMessage(chatId, "Выберите тип промпта для генерации:", { reply_markup: { inline_keyboard: [[{ text: 'Ординар', callback_data: 'prompt_single' }, { text: 'Экспресс', callback_data: 'prompt_express' }]] } });
+
+        } catch (error) {
+            console.error('Произошла ошибка в процессе сбора данных:', error);
+            bot.sendMessage(chatId, `❌ К сожалению, произошла ошибка: ${error.message}.`);
+            conversationState.delete(chatId);
+        }
+    };
+
+
+
+
+
+    bot.on('callback_query', async (callbackQuery) => {
+
+
+        const msg = callbackQuery.message;
+
+
+        const chatId = msg.chat.id;
+
+
+        const data = callbackQuery.data;
+
+
+        const state = conversationState.get(chatId) || {};
+
+
+
+
+
+        if (data.startsWith('date_')) {
+
+
+            const dayOffset = parseInt(data.split('_')[1], 10);
+
+
+            const dayName = ['сегодня', 'завтра', 'послезавтра'][dayOffset] || `дату со смещением ${dayOffset} дней`;
+
+
+
+
+
+            await bot.answerCallbackQuery(callbackQuery.id);
+
+
+            await bot.sendMessage(chatId, `Идет поиск матчей на ${dayName}...`);
+
+
+
+
+
+            try {
+
+
+                const events = await getStatshubEvents(getStartOfDayTimestampSeconds(dayOffset), getEndOfDayTimestampSeconds(dayOffset));
+
+
+                if (!events || !events.data || events.data.length === 0) return bot.sendMessage(chatId, `На ${dayName} матчей не найдено.`);
+
+
+
+
+
+                const matches = events.data.map(el => ({ homeTeam: el.homeTeam.name, homeTeamId: el.homeTeam.id, awayTeam: el.awayTeam.name, awayTeamId: el.awayTeam.id, tournament: el.unique_tournaments.name, tournamentId: el.unique_tournaments.id, eventId: el.events.id, refereeId: el.events.refereeId, status: el.events.status }));
+
+
+                const matchesByTournament = matches.reduce((acc, match) => { (acc[match.tournament] = acc[match.tournament] || []).push(match); return acc; }, {});
+
+
+                const tournaments = Object.entries(matchesByTournament).map(([name, matches]) => ({ tournamentName: name, matches }));
+
+
+
+
+
+                state.tournaments = tournaments;
+
+
+                state.dayOffset = dayOffset;
+
+
+                conversationState.set(chatId, state);
+
+
+
+
+
+                if (tournaments.length === 0) return bot.sendMessage(chatId, `На ${dayName} матчей не найдено.`);
+                await bot.sendMessage(chatId, `Отлично! Вот матчи на ${dayName}. Выберите один для анализа:`);
+                for (const [i, t] of tournaments.entries()) {
+                    await bot.sendMessage(chatId, `⚽️ ${t.tournamentName} ⚽️`);
+                    await bot.sendMessage(chatId, 'Выберите матч:', { reply_markup: { inline_keyboard: t.matches.map((m, mi) => ([{ text: `${m.homeTeam} - ${m.awayTeam}`, callback_data: `match_select_${i}_${mi}` }])) } });
+                }
+
+
+            } catch (error) {
+
+
+                console.error(`Произошла ошибка при получении матчей для смещения ${dayOffset}:`, error);
+
+
+                bot.sendMessage(chatId, "К сожалению, произошла ошибка при получении матчей. Пожалуйста, попробуйте позже.");
+
+
+            }
+
+
+        } else if (data.startsWith('match_select_')) {
+
+
+            if (!state.tournaments) return bot.answerCallbackQuery(callbackQuery.id, { text: "Произошла ошибка, данные о матчах устарели. Начните заново.", show_alert: true });
+
+
+
+
+
+            await bot.answerCallbackQuery(callbackQuery.id);
+
+
+            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
+
+
+
+
+
+            const [, , tournamentIndex, matchIndex] = data.split('_').map(Number);
+
+
+            const selectedMatch = state.tournaments[tournamentIndex]?.matches[matchIndex];
+
+
+
+
+
+            if (!selectedMatch) return bot.sendMessage(chatId, "Не удалось найти выбранный матч. Пожалуйста, начните заново.");
+
+
+
+
+
+            state.selectedMatch = selectedMatch;
+
+
+            state.match = `${selectedMatch.homeTeam} vs ${selectedMatch.awayTeam} (${selectedMatch.tournament})`;
+
+
+            state.statshubMatchInfo = { homeTeam: { id: selectedMatch.homeTeamId, name: selectedMatch.homeTeam }, awayTeam: { id: selectedMatch.awayTeamId, name: selectedMatch.awayTeam } };
+
+
+
+
+
+            await bot.sendMessage(chatId, `Вы выбрали матч: ${state.match}.`);
+
+
+            await bot.sendMessage(chatId, "▶️ Получение списка турниров для команд...");
+
+
+
+
+
+            try {
+
+
+                const [homeT, awayT] = await Promise.all([getTeamTournaments(selectedMatch.homeTeamId), getTeamTournaments(selectedMatch.awayTeamId)]);
+
+
+
+
+
+                const parseTournaments = d => d ? Object.entries(d).map(([id, deets]) => ({ id, name: deets.tournamentName })) : [];
+
+
+                state.homeTournaments = parseTournaments(homeT);
+
+
+                state.awayTournaments = parseTournaments(awayT);
+
+
+
+
+
+                if (state.homeTournaments.length === 0) return bot.sendMessage(chatId, `Не удалось найти турниры для команды ${selectedMatch.homeTeam}.`);
+
+
+
+
+
+                state.state = 'awaiting_home_tournament';
+
+
+                conversationState.set(chatId, state);
+
+
+
+
+
+                const homeKeyboard = state.homeTournaments.map(t => ([{ text: t.name, callback_data: `hometournament_select_${t.id}` }]));
+
+
+                homeKeyboard.push([{ text: 'Все турниры', callback_data: 'hometournament_select_all' }]);
+
+
+
+
+
+                await bot.sendMessage(chatId, `Выберите лигу для анализа команды ${selectedMatch.homeTeam}:`, {
+
+
+                    reply_markup: { inline_keyboard: homeKeyboard }
+
+
+                });
+
+
+
+
+
+            } catch (error) {
+
+
+                console.error("Ошибка при получении турниров команд:", error);
+
+
+                bot.sendMessage(chatId, "К сожалению, произошла ошибка при получении списков турниров.");
+
+
+            }
+
+
+        } else if (data.startsWith('hometournament_select_')) {
+
+
+            if (state.state !== 'awaiting_home_tournament') return;
+
+
+
+
+
+            await bot.answerCallbackQuery(callbackQuery.id);
+
+
+            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
+
+
+
+
+
+            const id = data.substring('hometournament_select_'.length);
+
+
+            state.selectedHomeTournamentId = id === 'all' ? state.homeTournaments.map(t => t.id).join(',') : id;
+
+
+
+
+
+            const choice = id === 'all' ? 'Все турниры' : state.homeTournaments.find(t => t.id === id)?.name;
+
+
+            await bot.sendMessage(chatId, `Для ${state.statshubMatchInfo.homeTeam.name} выбран(ы): ${choice || 'ID ' + id}.`);
+
+
+
+
+
+            if (state.awayTournaments.length === 0) return bot.sendMessage(chatId, `Не удалось найти турниры для команды ${state.statshubMatchInfo.awayTeam.name}.`);
+
+
+
+
+
+            state.state = 'awaiting_away_tournament';
+
+
+            conversationState.set(chatId, state);
+
+
+
+
+
+            const awayKeyboard = state.awayTournaments.map(t => ([{ text: t.name, callback_data: `awaytournament_select_${t.id}` }]));
+
+
+            awayKeyboard.push([{ text: 'Все турниры', callback_data: 'awaytournament_select_all' }]);
+
+
+
+
+
+            await bot.sendMessage(chatId, `Выберите лигу для анализа команды ${state.statshubMatchInfo.awayTeam.name}:`, {
+
+
+                reply_markup: { inline_keyboard: awayKeyboard }
+
+
+            });
+
+
+        } else if (data.startsWith('awaytournament_select_')) {
+
+
+            if (state.state !== 'awaiting_away_tournament') return;
+
+
+
+
+
+            await bot.answerCallbackQuery(callbackQuery.id);
+
+
+            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
+
+
+
+
+
+            const id = data.substring('awaytournament_select_'.length);
+
+
+            state.selectedAwayTournamentId = id === 'all' ? state.awayTournaments.map(t => t.id).join(',') : id;
+
+
+
+
+
+            const choice = id === 'all' ? 'Все турниры' : state.awayTournaments.find(t => t.id === id)?.name;
+
+
+            await bot.sendMessage(chatId, `Для ${state.statshubMatchInfo.awayTeam.name} выбран(ы): ${choice || 'ID ' + id}.`);
+
+
+
+
+
+            state.state = 'fetching_data';
+
+
+            conversationState.set(chatId, state);
+
+
+
+
+
+            await continueFetchingData(chatId, state);
+
+
+        } else if (data.startsWith('prompt_')) {
+
+
+            if (state.state !== 'awaiting_prompt_type') return bot.answerCallbackQuery(callbackQuery.id, { text: "Ошибка: не найдено данных для генерации промпта. Начните заново с /start.", show_alert: true });
+
+
+
+
+
+            const promptType = data.split('_')[1];
+
+
+            await bot.answerCallbackQuery(callbackQuery.id);
+
+
+            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
+
+
+
+
+
+            await bot.sendMessage(chatId, `Генерирую промпт для типа "${promptType === 'single' ? 'Ординар' : 'Экспресс'}"...`);
+
+
+            const finalPromptText = await generateFinalPrompt(promptType, state);
+
+
+            const filePath = path.join(__dirname, '..', 'temp', `final_prompt_${chatId}.txt`);
+
+
+
+
+
+            try {
+
+
+                await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+
+                await fs.writeFile(filePath, finalPromptText);
+
+
+                await bot.sendDocument(chatId, filePath, {}, { contentType: 'text/plain' });
+
+
+                await fs.unlink(filePath);
+
+
+            } catch (error) {
+
+
+                console.error('Произошла ошибка при создании файла промпта:', error);
+
+
+                bot.sendMessage(chatId, `К сожалению, произошла ошибка при создании файла: ${error.message}.`);
+
+
+            } finally {
+
+
+                conversationState.delete(chatId);
+
+
+            }
+
+
+        }
+
+
+    });
+
+
+
+
+
+    bot.on('message', async (msg) => {
+
+
+        if (!msg.text || msg.text.startsWith('/')) return;
+
+
+        const state = conversationState.get(msg.chat.id);
+
+
+        if (!state && !msg.text.includes("HTML сохранен для отладки:")) {
+
+
+            bot.sendMessage(msg.chat.id, "Неизвестная команда или сообщение. Используйте /start, чтобы начать.");
+
+
+        }
+    });
+}
+
+module.exports = {
+    setupHandlers,
+};
