@@ -30,7 +30,7 @@ const formatOddsHistory = (apiData, oddsMetadata, poissonProbabilities) => {
   });
 
   // --- Step 2: Format the final output string ---
-  let resultString = 'ДВИЖЕНИЕ КОЭФФИЦИЕНТОВ [Вес: Очень высокий]: Доверяй Fair кэфу в данных, он рассчитан на базе xG модели По Пуассону, используй его как опорную точку\n';
+  let resultString = 'ДВИЖЕНИЕ КОЭФФИЦИЕНТОВ [Вес: Очень высокий]: Доверяй Fair кэфу в данных, он рассчитан на базе xG модели По Пуассону и методу Монтекарло, используй его как опорную точку\n';
   let hasFilteredOdds = false;
 
   const sortedOddIds = Object.keys(apiData).sort((a, b) => {

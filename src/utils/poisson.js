@@ -1,35 +1,23 @@
 // src/utils/poisson.js
 
 /**
- * A simple memoized factorial function.
- * @param {number} n - The number to calculate the factorial for.
- * @returns {number} The factorial of n.
+ * Generates a random integer from a Poisson distribution.
+ * Uses the Knuth algorithm, which is efficient for small lambda values.
+ * @param {number} lambda - The average rate of events (must be > 0).
+ * @returns {number} A random integer following the Poisson distribution.
  */
-const factorial = (() => {
-    const cache = [1, 1];
-    return (n) => {
-        if (n < 0) return NaN;
-        if (cache[n]) return cache[n];
-        let result = cache[cache.length - 1];
-        for (let i = cache.length; i <= n; i++) {
-            result *= i;
-            cache[i] = result;
-        }
-        return result;
-    };
-})();
-
-/**
- * Calculates the Poisson probability for a specific number of events given an average rate (lambda).
- * P(k; λ) = (λ^k * e^-λ) / k!
- * @param {number} k - The number of events (e.g., goals).
- * @param {number} lambda - The average rate of events (e.g., expected goals).
- * @returns {number} The Poisson probability.
- */
-function poissonProbability(k, lambda) {
-    if (k < 0 || lambda < 0) return 0;
-    return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
+function generatePoissonRandom(lambda) {
+    if (lambda <= 0) return 0;
+    const L = Math.exp(-lambda);
+    let p = 1.0;
+    let k = 0;
+    do {
+        k++;
+        p *= Math.random();
+    } while (p > L);
+    return k - 1;
 }
+
 
 /**
  * Determines the outcome of a bet for a given score.
@@ -108,15 +96,15 @@ function getMarketOutcome(h, a, marketName) {
 
 
 /**
- * Calculates outcome probabilities (win, push, loss) for a football match using a Poisson distribution model.
- * This function generates a matrix of score probabilities and then sums them up according
- * to the rules of each betting market.
+ * Calculates outcome probabilities for a football match using a Monte Carlo simulation
+ * based on a Poisson distribution of goals.
  * @param {object} homeTeamStats - The home team's stats, requires { home_xg_for, home_xg_against, home_games }.
  * @param {object} awayTeamStats - The away team's stats, requires { away_xg_for, away_xg_against, away_games }.
  * @param {Array<object>} markets - The oddsData array containing market definitions.
+ * @param {number} [simulations=10000] - The number of Monte Carlo simulations to run.
  * @returns {object} An object mapping market names to their calculated {win, push, loss} probabilities.
  */
-function calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, markets) {
+function calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, markets, simulations = 10000) {
     const homeAttack = parseFloat(homeTeamStats.home_xg_for) / homeTeamStats.home_games;
     const homeDefense = parseFloat(homeTeamStats.home_xg_against) / homeTeamStats.home_games;
     const awayAttack = parseFloat(awayTeamStats.away_xg_for) / awayTeamStats.away_games;
@@ -130,41 +118,35 @@ function calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, markets) {
         return {};
     }
 
-    const MAX_GOALS = 10; // Sufficient for over 99.9% of outcomes, better performance
-    const scoreMatrix = Array(MAX_GOALS + 1).fill(0).map(() => Array(MAX_GOALS + 1).fill(0));
-
-    // 1. Populate the score probability matrix
-    for (let h = 0; h <= MAX_GOALS; h++) {
-        for (let a = 0; a <= MAX_GOALS; a++) {
-            const homeProb = poissonProbability(h, lambdaHome);
-            const awayProb = poissonProbability(a, lambdaAway);
-            scoreMatrix[h][a] = homeProb * awayProb;
-        }
+    // 1. Run the Monte Carlo simulation
+    const simulatedScores = [];
+    for (let i = 0; i < simulations; i++) {
+        const homeGoals = generatePoissonRandom(lambdaHome);
+        const awayGoals = generatePoissonRandom(lambdaAway);
+        simulatedScores.push({ h: homeGoals, a: awayGoals });
     }
 
     const marketProbabilities = {};
-    // 2. For each market, sum the probabilities for Win, Push, and Loss
+    // 2. For each market, count the outcomes from the simulation results
     for (const market of markets) {
-        const probs = { win: 0, push: 0, loss: 0 };
+        const counts = { win: 0, push: 0, loss: 0 };
         
-        for (let h = 0; h <= MAX_GOALS; h++) {
-            for (let a = 0; a <= MAX_GOALS; a++) {
-                const outcome = getMarketOutcome(h, a, market.name);
-                if (outcome === 'WIN') {
-                    probs.win += scoreMatrix[h][a];
-                } else if (outcome === 'PUSH') {
-                    probs.push += scoreMatrix[h][a];
-                }
+        for (const score of simulatedScores) {
+            const outcome = getMarketOutcome(score.h, score.a, market.name);
+            if (outcome === 'WIN') {
+                counts.win++;
+            } else if (outcome === 'PUSH') {
+                counts.push++;
             }
         }
         
-        probs.loss = 1 - probs.win - probs.push;
+        counts.loss = simulations - counts.win - counts.push;
 
-        // Convert to percentage and store
+        // Convert counts to percentage and store
         marketProbabilities[market.name] = {
-            win: probs.win * 100,
-            push: probs.push * 100,
-            loss: probs.loss * 100,
+            win: (counts.win / simulations) * 100,
+            push: (counts.push / simulations) * 100,
+            loss: (counts.loss / simulations) * 100,
         };
     }
 

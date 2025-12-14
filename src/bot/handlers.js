@@ -48,6 +48,47 @@ const setupHandlers = (bot, conversationState) => {
             state.statshubAwayPerformance = processPerformanceData(awayPerformanceData);
             await bot.sendMessage(chatId, "✅ Успешно! Статистика производительности команд получена.");
 
+            // --- NEW: AI-POWERED PERFORMANCE ANALYSIS ---
+            const getPerformanceAnalysis = async (teamName, performanceData) => {
+                if (!performanceData || performanceData.length === 0) {
+                    return "Нет данных для анализа.";
+                }
+
+                const analysisPrompt = `
+Ты — элитный футбольный аналитик. Тебе предоставлены данные о последних матчах команды "${teamName}".
+Каждый матч содержит счет, ключевую статистику команды и статистику ее соперника.
+
+Данные:
+\`\`\`json
+${JSON.stringify(performanceData, null, 2)}
+\`\`\`
+
+Твоя задача — написать подробное, но структурированное резюме (4-5 предложений) об игровой форме и стиле команды.
+
+Проанализируй следующие аспекты:
+1.  **Результаты и стабильность:** Как команда выступала? Были ли это победы над сильными соперниками или поражения от аутсайдеров? Укажи, с кем играли.
+2.  **Атакующий стиль:** На чем строится атака? Создают ли много моментов (высокий xG)? Как обстоят дела с реализацией (сравни голы и xG)? Есть ли зависимость от определенного типа атак (например, через фланги, если много касаний в штрафной)?
+3.  **Оборонительная надежность:** Насколько надежна оборона? Много ли допускают моментов у своих ворот (xG соперника)? Какие слабые места были заметны в прошлых играх (например, "проблемы при стандартах", "уязвимость к контратакам")?
+4.  **Общий вывод:** Сформулируй итоговый вывод о текущем состоянии команды. Какие у нее сильные стороны, а какие проблемы могут проявиться в следующей игре?
+
+Стиль ответа должен быть профессиональным, аналитическим, без "воды".
+Не просто перечисляй цифры, а интерпретируй их, чтобы дать глубокое понимание игры команды.
+`;
+                try {
+                    const analysis = await getPrediction(analysisPrompt);
+                    return analysis;
+                } catch (e) {
+                    console.error(`Ошибка при генерации AI-анализа для ${teamName}:`, e);
+                    return `Не удалось сгенерировать анализ для ${teamName}.`;
+                }
+            };
+
+            await bot.sendMessage(chatId, "▶️ ИИ анализирует игровую форму команд...");
+            state.homePerformanceAnalysis = await getPerformanceAnalysis(homeTeam.name, state.statshubHomePerformance);
+            state.awayPerformanceAnalysis = await getPerformanceAnalysis(awayTeam.name, state.statshubAwayPerformance);
+            await bot.sendMessage(chatId, "✅ Успешно! Анализ игровой формы завершен.");
+
+
             // --- POISSON PROBABILITY CALCULATION ---
             await bot.sendMessage(chatId, "▶️ Расчет вероятностей исходов по модели Пуассона...");
             try {
@@ -356,180 +397,565 @@ ${cleanedFacts.join('\n')}
     bot.on('callback_query', async (callbackQuery) => {
 
 
-        const msg = callbackQuery.message;
 
 
-        const chatId = msg.chat.id;
 
-
-        const data = callbackQuery.data;
-
-
-        const state = conversationState.get(chatId) || {};
+            const msg = callbackQuery.message;
 
 
 
 
 
-        if (data.startsWith('date_')) {
-
-
-            const dayOffset = parseInt(data.split('_')[1], 10);
-
-
-            const dayName = ['сегодня', 'завтра', 'послезавтра'][dayOffset] || `дату со смещением ${dayOffset} дней`;
+            const chatId = msg.chat.id;
 
 
 
 
 
-            await bot.answerCallbackQuery(callbackQuery.id);
-
-
-            await bot.sendMessage(chatId, `Идет поиск матчей на ${dayName}...`);
+            const data = callbackQuery.data;
 
 
 
 
 
-            try {
-
-
-                const events = await getStatshubEvents(getStartOfDayTimestampSeconds(dayOffset), getEndOfDayTimestampSeconds(dayOffset));
-
-
-                if (!events || !events.data || events.data.length === 0) return bot.sendMessage(chatId, `На ${dayName} матчей не найдено.`);
+            const state = conversationState.get(chatId) || {};
 
 
 
 
 
-                const matches = events.data.map(el => ({ homeTeam: el.homeTeam.name, homeTeamId: el.homeTeam.id, awayTeam: el.awayTeam.name, awayTeamId: el.awayTeam.id, tournament: el.unique_tournaments.name, tournamentId: el.unique_tournaments.id, eventId: el.events.id, refereeId: el.events.refereeId, status: el.events.status }));
-
-
-                const matchesByTournament = matches.reduce((acc, match) => { (acc[match.tournament] = acc[match.tournament] || []).push(match); return acc; }, {});
-
-
-                const tournaments = Object.entries(matchesByTournament).map(([name, matches]) => ({ tournamentName: name, matches }));
+    
 
 
 
 
 
-                state.tournaments = tournaments;
-
-
-                state.dayOffset = dayOffset;
-
-
-                conversationState.set(chatId, state);
+    
 
 
 
 
 
-                if (tournaments.length === 0) return bot.sendMessage(chatId, `На ${dayName} матчей не найдено.`);
-                await bot.sendMessage(chatId, `Отлично! Вот матчи на ${dayName}. Выберите один для анализа:`);
-                for (const [i, t] of tournaments.entries()) {
-                    await bot.sendMessage(chatId, `⚽️ ${t.tournamentName} ⚽️`);
-                    await bot.sendMessage(chatId, 'Выберите матч:', { reply_markup: { inline_keyboard: t.matches.map((m, mi) => ([{ text: `${m.homeTeam} - ${m.awayTeam}`, callback_data: `match_select_${i}_${mi}` }])) } });
+            if (data.startsWith('date_')) {
+
+
+
+
+
+                const dayOffset = parseInt(data.split('_')[1], 10);
+
+
+
+
+
+                const dayName = ['сегодня', 'завтра', 'послезавтра'][dayOffset] || `дату со смещением ${dayOffset} дней`;
+
+
+
+
+
+    
+
+
+
+
+
+                await bot.answerCallbackQuery(callbackQuery.id);
+
+
+
+
+
+                await bot.sendMessage(chatId, `Идет поиск матчей на ${dayName}...`);
+
+
+
+
+
+    
+
+
+
+
+
+                try {
+
+
+
+
+
+                    const events = await getStatshubEvents(getStartOfDayTimestampSeconds(dayOffset), getEndOfDayTimestampSeconds(dayOffset));
+
+
+
+
+
+                    if (!events || !events.data || events.data.length === 0) return bot.sendMessage(chatId, `На ${dayName} матчей не найдено.`);
+
+
+
+
+
+    
+
+
+
+
+
+                    const matches = events.data.map(el => ({ homeTeam: el.homeTeam.name, homeTeamId: el.homeTeam.id, awayTeam: el.awayTeam.name, awayTeamId: el.awayTeam.id, tournament: el.unique_tournaments.name, tournamentId: el.unique_tournaments.id, eventId: el.events.id, refereeId: el.events.refereeId, status: el.events.status }));
+
+
+
+
+
+                    const matchesByTournament = matches.reduce((acc, match) => { (acc[match.tournament] = acc[match.tournament] || []).push(match); return acc; }, {});
+
+
+
+
+
+                    const tournaments = Object.entries(matchesByTournament).map(([name, matches]) => ({ tournamentName: name, matches }));
+
+
+
+
+
+    
+
+
+
+
+
+                    state.tournaments = tournaments;
+
+
+
+
+
+                    state.dayOffset = dayOffset;
+
+
+
+
+
+                    conversationState.set(chatId, state);
+
+
+
+
+
+    
+
+
+
+
+
+                    if (tournaments.length === 0) return bot.sendMessage(chatId, `На ${dayName} матчей не найдено.`);
+
+
+
+
+
+                    await bot.sendMessage(chatId, `Отлично! Вот матчи на ${dayName}. Выберите один для анализа:`);
+
+
+
+
+
+                    for (const [i, t] of tournaments.entries()) {
+
+
+
+
+
+                        await bot.sendMessage(chatId, `⚽️ ${t.tournamentName} ⚽️`);
+
+
+
+
+
+                        await bot.sendMessage(chatId, 'Выберите матч:', { reply_markup: { inline_keyboard: t.matches.map((m, mi) => ([{ text: `${m.homeTeam} - ${m.awayTeam}`, callback_data: `match_select_${i}_${mi}` }])) } });
+
+
+
+
+
+                    }
+
+
+
+
+
+                } catch (error) {
+
+
+
+
+
+                    console.error(`Произошла ошибка при получении матчей для смещения ${dayOffset}:`, error);
+
+
+
+
+
+                    bot.sendMessage(chatId, "К сожалению, произошла ошибка при получении матчей. Пожалуйста, попробуйте позже.");
+
+
+
+
+
                 }
 
 
-            } catch (error) {
 
 
-                console.error(`Произошла ошибка при получении матчей для смещения ${dayOffset}:`, error);
 
+    
 
-                bot.sendMessage(chatId, "К сожалению, произошла ошибка при получении матчей. Пожалуйста, попробуйте позже.");
 
 
-            }
 
 
-        } else if (data.startsWith('match_select_')) {
+            } else if (data.startsWith('match_select_')) {
 
 
-            if (!state.tournaments) return bot.answerCallbackQuery(callbackQuery.id, { text: "Произошла ошибка, данные о матчах устарели. Начните заново.", show_alert: true });
 
 
 
+                if (!state.tournaments) return bot.answerCallbackQuery(callbackQuery.id, { text: "Произошла ошибка, данные о матчах устарели. Начните заново.", show_alert: true });
 
 
-            await bot.answerCallbackQuery(callbackQuery.id);
 
 
-            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
 
+    
 
 
 
 
-            const [, , tournamentIndex, matchIndex] = data.split('_').map(Number);
 
+                await bot.answerCallbackQuery(callbackQuery.id);
 
-            const selectedMatch = state.tournaments[tournamentIndex]?.matches[matchIndex];
 
 
 
 
+                await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
 
-            if (!selectedMatch) return bot.sendMessage(chatId, "Не удалось найти выбранный матч. Пожалуйста, начните заново.");
 
 
 
 
+    
 
-            state.selectedMatch = selectedMatch;
 
 
-            state.match = `${selectedMatch.homeTeam} vs ${selectedMatch.awayTeam} (${selectedMatch.tournament})`;
 
 
-            state.statshubMatchInfo = { homeTeam: { id: selectedMatch.homeTeamId, name: selectedMatch.homeTeam }, awayTeam: { id: selectedMatch.awayTeamId, name: selectedMatch.awayTeam } };
+                const [, , tournamentIndex, matchIndex] = data.split('_').map(Number);
 
 
 
 
 
-            await bot.sendMessage(chatId, `Вы выбрали матч: ${state.match}.`);
+                const selectedMatch = state.tournaments[tournamentIndex]?.matches[matchIndex];
 
 
-            await bot.sendMessage(chatId, "▶️ Получение списка турниров для команд...");
 
 
 
+    
 
 
-            try {
 
 
-                const [homeT, awayT] = await Promise.all([getTeamTournaments(selectedMatch.homeTeamId), getTeamTournaments(selectedMatch.awayTeamId)]);
 
+                if (!selectedMatch) return bot.sendMessage(chatId, "Не удалось найти выбранный матч. Пожалуйста, начните заново.");
 
 
 
 
-                const parseTournaments = d => d ? Object.entries(d).map(([id, deets]) => ({ id, name: deets.tournamentName })) : [];
 
+    
 
-                state.homeTournaments = parseTournaments(homeT);
 
 
-                state.awayTournaments = parseTournaments(awayT);
 
 
+                state.selectedMatch = selectedMatch;
 
 
 
-                if (state.homeTournaments.length === 0) return bot.sendMessage(chatId, `Не удалось найти турниры для команды ${selectedMatch.homeTeam}.`);
 
 
+                state.match = `${selectedMatch.homeTeam} vs ${selectedMatch.awayTeam} (${selectedMatch.tournament})`;
 
 
 
-                state.state = 'awaiting_home_tournament';
+
+
+                state.statshubMatchInfo = { homeTeam: { id: selectedMatch.homeTeamId, name: selectedMatch.homeTeam }, awayTeam: { id: selectedMatch.awayTeamId, name: selectedMatch.awayTeam } };
+
+
+
+
+
+    
+
+
+
+
+
+                await bot.sendMessage(chatId, `Вы выбрали матч: ${state.match}.`);
+
+
+
+
+
+                await bot.sendMessage(chatId, "▶️ Получение списка турниров для команд...");
+
+
+
+
+
+    
+
+
+
+
+
+                try {
+
+
+
+
+
+                    const [homeT, awayT] = await Promise.all([getTeamTournaments(selectedMatch.homeTeamId), getTeamTournaments(selectedMatch.awayTeamId)]);
+
+
+
+
+
+    
+
+
+
+
+
+                    const parseTournaments = d => d ? Object.entries(d).map(([id, deets]) => ({ id, name: deets.tournamentName })) : [];
+
+
+
+
+
+                    state.homeTournaments = parseTournaments(homeT);
+
+
+
+
+
+                    state.awayTournaments = parseTournaments(awayT);
+
+
+
+
+
+    
+
+
+
+
+
+                    if (state.homeTournaments.length === 0) return bot.sendMessage(chatId, `Не удалось найти турниры для команды ${selectedMatch.homeTeam}.`);
+
+
+
+
+
+    
+
+
+
+
+
+                    state.state = 'awaiting_home_tournament';
+
+
+
+
+
+                    conversationState.set(chatId, state);
+
+
+
+
+
+    
+
+
+
+
+
+                    const homeKeyboard = state.homeTournaments.map(t => ([{ text: t.name, callback_data: `hometournament_select_${t.id}` }]));
+
+
+
+
+
+                    homeKeyboard.push([{ text: 'Все турниры', callback_data: 'hometournament_select_all' }]);
+
+
+
+
+
+    
+
+
+
+
+
+                    await bot.sendMessage(chatId, `Выберите лигу для анализа команды ${selectedMatch.homeTeam}:`, {
+
+
+
+
+
+                        reply_markup: { inline_keyboard: homeKeyboard }
+
+
+
+
+
+                    });
+
+
+
+
+
+    
+
+
+
+
+
+                } catch (error) {
+
+
+
+
+
+                    console.error("Ошибка при получении турниров команд:", error);
+
+
+
+
+
+                    bot.sendMessage(chatId, "К сожалению, произошла ошибка при получении списков турниров.");
+
+
+
+
+
+                }
+
+
+
+
+
+    
+
+
+
+
+
+            } else if (data.startsWith('hometournament_select_')) {
+
+
+
+
+
+                if (state.state !== 'awaiting_home_tournament') return;
+
+
+
+
+
+    
+
+
+
+
+
+                await bot.answerCallbackQuery(callbackQuery.id);
+
+
+
+
+
+                await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
+
+
+
+
+
+    
+
+
+
+
+
+                const id = data.substring('hometournament_select_'.length);
+
+
+
+
+
+                state.selectedHomeTournamentId = id === 'all' ? state.homeTournaments.map(t => t.id).join(',') : id;
+
+
+
+
+
+    
+
+
+
+
+
+                const choice = id === 'all' ? 'Все турниры' : state.homeTournaments.find(t => t.id === id)?.name;
+
+
+
+
+
+                await bot.sendMessage(chatId, `Для ${state.statshubMatchInfo.homeTeam.name} выбран(ы): ${choice || 'ID ' + id}.`);
+
+
+
+
+
+    
+
+
+
+
+
+                if (state.awayTournaments.length === 0) return bot.sendMessage(chatId, `Не удалось найти турниры для команды ${state.statshubMatchInfo.awayTeam.name}.`);
+
+
+
+
+
+    
+
+
+
+
+
+                state.state = 'awaiting_away_tournament';
+
+
+
 
 
                 conversationState.set(chatId, state);
@@ -538,19 +964,40 @@ ${cleanedFacts.join('\n')}
 
 
 
-                const homeKeyboard = state.homeTournaments.map(t => ([{ text: t.name, callback_data: `hometournament_select_${t.id}` }]));
-
-
-                homeKeyboard.push([{ text: 'Все турниры', callback_data: 'hometournament_select_all' }]);
+    
 
 
 
 
 
-                await bot.sendMessage(chatId, `Выберите лигу для анализа команды ${selectedMatch.homeTeam}:`, {
+                const awayKeyboard = state.awayTournaments.map(t => ([{ text: t.name, callback_data: `awaytournament_select_${t.id}` }]));
 
 
-                    reply_markup: { inline_keyboard: homeKeyboard }
+
+
+
+                awayKeyboard.push([{ text: 'Все турниры', callback_data: 'awaytournament_select_all' }]);
+
+
+
+
+
+    
+
+
+
+
+
+                await bot.sendMessage(chatId, `Выберите лигу для анализа команды ${state.statshubMatchInfo.awayTeam.name}:`, {
+
+
+
+
+
+                    reply_markup: { inline_keyboard: awayKeyboard }
+
+
+
 
 
                 });
@@ -559,229 +1006,544 @@ ${cleanedFacts.join('\n')}
 
 
 
-            } catch (error) {
+    
 
 
-                console.error("Ошибка при получении турниров команд:", error);
 
 
-                bot.sendMessage(chatId, "К сожалению, произошла ошибка при получении списков турниров.");
+
+            } else if (data.startsWith('awaytournament_select_')) {
+
+
+
+
+
+                if (state.state !== 'awaiting_away_tournament') return;
+
+
+
+
+
+    
+
+
+
+
+
+                await bot.answerCallbackQuery(callbackQuery.id);
+
+
+
+
+
+                await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
+
+
+
+
+
+    
+
+
+
+
+
+                const id = data.substring('awaytournament_select_'.length);
+
+
+
+
+
+                state.selectedAwayTournamentId = id === 'all' ? state.awayTournaments.map(t => t.id).join(',') : id;
+
+
+
+
+
+    
+
+
+
+
+
+                const choice = id === 'all' ? 'Все турниры' : state.awayTournaments.find(t => t.id === id)?.name;
+
+
+
+
+
+                await bot.sendMessage(chatId, `Для ${state.statshubMatchInfo.awayTeam.name} выбран(ы): ${choice || 'ID ' + id}.`);
+
+
+
+
+
+    
+
+
+
+
+
+                // New step: Ask for expert opinion
+
+
+
+
+
+                state.state = 'awaiting_expert_opinion';
+
+
+
+
+
+                conversationState.set(chatId, state);
+
+
+
+
+
+    
+
+
+
+
+
+                const date = new Date();
+
+
+
+
+
+                date.setDate(date.getDate() + state.dayOffset);
+
+
+
+
+
+                const dateString = date.toLocaleDateString('ru-RU');
+
+
+
+
+
+    
+
+
+
+
+
+                const perplexityPrompt = `
+
+
+
+
+
+    Пожалуйста, найди в Perplexity общее мнение экспертов о матче и предоставь краткое, но информативное резюме.
+
+
+
+
+
+    
+
+
+
+
+
+    **Промпт для Perplexity:**
+
+
+
+
+
+    "What are the expert predictions for the football match ${state.match} on ${dateString}? Summarize the general sentiment, key arguments for each side, and any notable team news."
+
+
+
+
+
+    
+
+
+
+
+
+    Отправь полученное резюме в этот чат.
+
+
+
+
+
+    `;
+
+
+
+
+
+                await bot.sendMessage(chatId, perplexityPrompt);
+
+
+
+
+
+    
+
+
+
+
+
+            } else if (data.startsWith('prompt_')) {
+
+
+
+
+
+                if (state.state !== 'awaiting_prompt_type') return bot.answerCallbackQuery(callbackQuery.id, { text: "Ошибка: не найдено данных для генерации промпта. Начните заново с /start.", show_alert: true });
+
+
+
+
+
+    
+
+
+
+
+
+                const promptType = data.split('_')[1];
+
+
+
+
+
+                await bot.answerCallbackQuery(callbackQuery.id);
+
+
+
+
+
+                await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
+
+
+
+
+
+    
+
+
+
+
+
+                await bot.sendMessage(chatId, `Генерирую промпт для типа "${promptType === 'single' ? 'Ординар' : 'Экспресс'}"...`);
+
+
+
+
+
+                const finalPromptText = await generateFinalPrompt(promptType, state);
+
+
+
+
+
+                const filePath = path.join(__dirname, '..', 'temp', `final_prompt_${chatId}.txt`);
+
+
+
+
+
+    
+
+
+
+
+
+                try {
+
+
+
+
+
+                    await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+
+
+
+
+                    await fs.writeFile(filePath, finalPromptText);
+
+
+
+
+
+                    await bot.sendDocument(chatId, filePath, {}, { contentType: 'text/plain' });
+
+
+
+
+
+                    await fs.unlink(filePath);
+
+
+
+
+
+                } catch (error) {
+
+
+
+
+
+                    console.error('Произошла ошибка при создании файла промпта:', error);
+
+
+
+
+
+                    bot.sendMessage(chatId, `К сожалению, произошла ошибка при создании файла: ${error.message}.`);
+
+
+
+
+
+                } finally {
+
+
+
+
+
+                    conversationState.delete(chatId);
+
+
+
+
+
+                }
+
+
+
 
 
             }
 
 
-        } else if (data.startsWith('hometournament_select_')) {
 
 
-            if (state.state !== 'awaiting_home_tournament') return;
 
+        });
 
 
 
 
-            await bot.answerCallbackQuery(callbackQuery.id);
 
+    
 
-            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
 
 
 
 
+        bot.on('message', async (msg) => {
 
-            const id = data.substring('hometournament_select_'.length);
 
 
-            state.selectedHomeTournamentId = id === 'all' ? state.homeTournaments.map(t => t.id).join(',') : id;
 
 
+            if (!msg.text || msg.text.startsWith('/')) return;
 
 
 
-            const choice = id === 'all' ? 'Все турниры' : state.homeTournaments.find(t => t.id === id)?.name;
 
 
-            await bot.sendMessage(chatId, `Для ${state.statshubMatchInfo.homeTeam.name} выбран(ы): ${choice || 'ID ' + id}.`);
+    
 
 
 
 
 
-            if (state.awayTournaments.length === 0) return bot.sendMessage(chatId, `Не удалось найти турниры для команды ${state.statshubMatchInfo.awayTeam.name}.`);
+            const state = conversationState.get(msg.chat.id);
 
 
 
 
 
-            state.state = 'awaiting_away_tournament';
+            if (!state) {
 
 
-            conversationState.set(chatId, state);
 
 
 
+                if (!msg.text.includes("HTML сохранен для отладки:")) {
 
 
-            const awayKeyboard = state.awayTournaments.map(t => ([{ text: t.name, callback_data: `awaytournament_select_${t.id}` }]));
 
 
-            awayKeyboard.push([{ text: 'Все турниры', callback_data: 'awaytournament_select_all' }]);
 
+                     bot.sendMessage(msg.chat.id, "Неизвестная команда или сообщение. Используйте /start, чтобы начать.");
 
 
 
 
-            await bot.sendMessage(chatId, `Выберите лигу для анализа команды ${state.statshubMatchInfo.awayTeam.name}:`, {
 
+                }
 
-                reply_markup: { inline_keyboard: awayKeyboard }
 
 
-            });
 
 
-        } else if (data.startsWith('awaytournament_select_')) {
+                return;
 
 
-            if (state.state !== 'awaiting_away_tournament') return;
 
-
-
-
-
-            await bot.answerCallbackQuery(callbackQuery.id);
-
-
-            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
-
-
-
-
-
-            const id = data.substring('awaytournament_select_'.length);
-
-
-            state.selectedAwayTournamentId = id === 'all' ? state.awayTournaments.map(t => t.id).join(',') : id;
-
-
-
-
-
-            const choice = id === 'all' ? 'Все турниры' : state.awayTournaments.find(t => t.id === id)?.name;
-
-
-            await bot.sendMessage(chatId, `Для ${state.statshubMatchInfo.awayTeam.name} выбран(ы): ${choice || 'ID ' + id}.`);
-
-
-
-
-
-            state.state = 'fetching_data';
-
-
-            conversationState.set(chatId, state);
-
-
-
-
-
-            await continueFetchingData(chatId, state);
-
-
-        } else if (data.startsWith('prompt_')) {
-
-
-            if (state.state !== 'awaiting_prompt_type') return bot.answerCallbackQuery(callbackQuery.id, { text: "Ошибка: не найдено данных для генерации промпта. Начните заново с /start.", show_alert: true });
-
-
-
-
-
-            const promptType = data.split('_')[1];
-
-
-            await bot.answerCallbackQuery(callbackQuery.id);
-
-
-            await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: msg.chat.id, message_id: msg.message_id }).catch(() => { });
-
-
-
-
-
-            await bot.sendMessage(chatId, `Генерирую промпт для типа "${promptType === 'single' ? 'Ординар' : 'Экспресс'}"...`);
-
-
-            const finalPromptText = await generateFinalPrompt(promptType, state);
-
-
-            const filePath = path.join(__dirname, '..', 'temp', `final_prompt_${chatId}.txt`);
-
-
-
-
-
-            try {
-
-
-                await fs.mkdir(path.dirname(filePath), { recursive: true });
-
-
-                await fs.writeFile(filePath, finalPromptText);
-
-
-                await bot.sendDocument(chatId, filePath, {}, { contentType: 'text/plain' });
-
-
-                await fs.unlink(filePath);
-
-
-            } catch (error) {
-
-
-                console.error('Произошла ошибка при создании файла промпта:', error);
-
-
-                bot.sendMessage(chatId, `К сожалению, произошла ошибка при создании файла: ${error.message}.`);
-
-
-            } finally {
-
-
-                conversationState.delete(chatId);
 
 
             }
 
 
-        }
-
-
-    });
 
 
 
+    
 
 
-    bot.on('message', async (msg) => {
 
 
-        if (!msg.text || msg.text.startsWith('/')) return;
+
+            // New handler for expert opinion
 
 
-        const state = conversationState.get(msg.chat.id);
 
 
-        if (!state && !msg.text.includes("HTML сохранен для отладки:")) {
+
+            if (state.state === 'awaiting_expert_opinion') {
 
 
-            bot.sendMessage(msg.chat.id, "Неизвестная команда или сообщение. Используйте /start, чтобы начать.");
 
 
-        }
-    });
-}
 
-module.exports = {
-    setupHandlers,
-};
+                state.expertOpinion = msg.text;
+
+
+
+
+
+                state.state = 'fetching_data';
+
+
+
+
+
+                conversationState.set(msg.chat.id, state);
+
+
+
+
+
+                
+
+
+
+
+
+                await bot.sendMessage(msg.chat.id, "✅ Мнение экспертов принято. Начинаю сбор и анализ данных...");
+
+
+
+
+
+                
+
+
+
+
+
+                // Now, start the data fetching process
+
+
+
+
+
+                await continueFetchingData(msg.chat.id, state);
+
+
+
+
+
+                return; // Important to stop further processing
+
+
+
+
+
+            }
+
+
+
+
+
+            
+
+
+
+
+
+            // Fallback for any other statefull message that is not handled
+
+
+
+
+
+            if (state.state) {
+
+
+
+
+
+                 bot.sendMessage(msg.chat.id, "Я ожидаю другого ответа. Пожалуйста, используйте кнопки или следуйте инструкциям.");
+
+
+
+
+
+            }
+
+
+
+
+
+        });
+
+
+
+
+
+    }
+
+
+
+
+
+    
+
+
+
+
+
+    module.exports = {
+
+
+
+
+
+        setupHandlers,
+
+
+
+
+
+    };
+
+
+
+
+
+    
