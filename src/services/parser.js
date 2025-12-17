@@ -11,16 +11,35 @@ puppeteer.use(StealthPlugin());
  */
 async function scrapeMatchesByDate(date) {
     const url = `https://fbref.com/en/matches/${date}`;
-    console.log(`Запускаю парсинг матчей по дате: ${url}`);
-
-    let browser;
     try {
         browser = await puppeteer.launch({
-            headless: true,
+            headless: false,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
+        await page.setViewport({ width: 1920, height: 1080 });
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        try {
+            // Wait for the schedule container to be visible to avoid race conditions
+            await page.waitForSelector('div[id^="all_sched_"]', { timeout: 120000 });
+        } catch (error) {
+            if (error.name === 'TimeoutError') {
+                console.error("Timeout waiting for selector. Saving debug info...");
+                const screenshotPath = '/home/kredo405/.gemini/tmp/401e09a38c60e7e20b470c88d0f709c7fe2bcd07492dde3083c103ae4ce0e0c3/fbref_error.png';
+                const htmlPath = '/home/kredo405/.gemini/tmp/401e09a38c60e7e20b470c88d0f709c7fe2bcd07492dde3083c103ae4ce0e0c3/fbref_error.html';
+                
+                await page.screenshot({ path: screenshotPath, fullPage: true });
+                const pageContent = await page.content();
+                const fs = require('fs/promises');
+                await fs.writeFile(htmlPath, pageContent);
+
+                console.error(`Debug screenshot saved to: ${screenshotPath}`);
+                console.error(`Debug HTML saved to: ${htmlPath}`);
+            }
+            throw error; // Re-throw the original error
+        }
 
         const leagues = await page.evaluate(() => {
             const allLeagues = [];
@@ -110,24 +129,75 @@ async function scrapeH2H(url) {
     let browser;
     try {
         browser = await puppeteer.launch({
-            headless: true,
+            headless: false,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
+        await page.setViewport({ width: 1920, height: 1080 });
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+
+        // Handle cookie consent button
+        try {
+            const cookieButtonSelector = 'button.css-10nqu2i';
+            await page.waitForSelector(cookieButtonSelector, { timeout: 5000 });
+            await page.click(cookieButtonSelector);
+            console.log('Cookie consent button clicked.');
+            await page.waitForTimeout(2000); // Wait for banner to disappear
+        } catch (e) {
+            console.log('Cookie consent button not found or already accepted.');
+        }
+
+
+        try {
+            // Wait for the main content to be visible to avoid race conditions
+            await page.waitForSelector('#content', { timeout: 10000 });
+        } catch (error) {
+            if (error.name === 'TimeoutError') {
+                console.error("Timeout waiting for selector. Saving debug info...");
+                const screenshotPath = '/home/kredo405/.gemini/tmp/401e09a38c60e7e20b470c88d0f709c7fe2bcd07492dde3083c103ae4ce0e0c3/fbref_error.png';
+                const htmlPath = '/home/kredo405/.gemini/tmp/401e09a38c60e7e20b470c88d0f709c7fe2bcd07492dde3083c103ae4ce0e0c3/fbref_error.html';
+                
+                await page.screenshot({ path: screenshotPath, fullPage: true });
+                const pageContent = await page.content();
+                const fs = require('fs/promises');
+                await fs.writeFile(htmlPath, pageContent);
+
+                console.error(`Debug screenshot saved to: ${screenshotPath}`);
+                console.error(`Debug HTML saved to: ${htmlPath}`);
+            }
+            throw error; // Re-throw the original error
+        }
 
         const h2hData = await page.evaluate(() => {
             const history = [];
             const currentYear = new Date().getFullYear();
-            const fiveYearsAgo = currentYear - 5;
+            const twoYearsAgo = currentYear - 2;
 
-            // Find the table more robustly
-            const historyTable = document.querySelector('table[id*="games_history"]');
+            // Find the table more robustly, checking comments as a fallback
+            let historyTable = document.querySelector('table[id*="games_history"]');
+
+            if (!historyTable) {
+                const comments = Array.from(document.body.childNodes)
+                    .filter(node => node.nodeType === Node.COMMENT_NODE)
+                    .map(comment => comment.textContent)
+                    .join('');
+                
+                if (comments.includes('id="games_history"')) {
+                    const tempDiv = document.createElement('div');
+                    tempDiv.innerHTML = comments;
+                    historyTable = tempDiv.querySelector('table[id*="games_history"]');
+                }
+            }
+
             if (!historyTable) return [];
 
-            const historyRows = historyTable.querySelectorAll('tbody tr[data-row]');
+            const historyRows = historyTable.querySelectorAll('tbody tr'); // more robust selector
 
             historyRows.forEach(row => {
+                // Check if it's a valid data row and not a subheader
+                if (!row.hasAttribute('data-row') && !row.classList.contains('spacer')) return;
+
                 const compEl = row.querySelector('[data-stat="comp"] a');
                 const dateEl = row.querySelector('[data-stat="date"] a');
                 const homeTeamEl = row.querySelector('[data-stat="home_team"] a');
@@ -141,8 +211,8 @@ async function scrapeH2H(url) {
                     const matchDateStr = dateEl.innerText;
                     const matchYear = parseInt(matchDateStr.split('-')[0], 10);
 
-                    // Apply filters: score must not be empty and match must be within the last 5 years
-                    if (score !== '' && matchYear >= fiveYearsAgo) {
+                    // Apply filters: score must not be empty and match must be within the last 2 years
+                    if (score !== '' && matchYear >= twoYearsAgo) {
                         history.push({
                             competition: compEl ? compEl.innerText : '',
                             date: matchDateStr,
@@ -185,10 +255,12 @@ async function scrapeWebsite(url) {
     let browser;
     try {
         browser = await puppeteer.launch({
-            headless: true,
+            headless: false,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
+        await page.setViewport({ width: 1920, height: 1080 });
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
         const extractedData = await page.evaluate(() => {
@@ -380,10 +452,12 @@ async function scrapeGoalkeeperStats(url) {
     let browser;
     try {
         browser = await puppeteer.launch({
-            headless: true,
+            headless: false,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
+        await page.setViewport({ width: 1920, height: 1080 });
         await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
         const goalkeeperStats = await page.evaluate(() => {

@@ -1,5 +1,21 @@
 // src/utils/poisson.js
 
+const factorial = (n) => {
+    if (n < 0) return Infinity; // Factorial is not defined for negative numbers
+    if (n === 0 || n === 1) return 1;
+    let result = 1;
+    for (let i = 2; i <= n; i++) {
+        result *= i;
+    }
+    return result;
+};
+
+const poissonProbability = (k, lambda) => {
+    if (lambda < 0 || k < 0) return 0;
+    return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
+};
+
+
 /**
  * Generates a random integer from a Poisson distribution.
  * Uses the Knuth algorithm, which is efficient for small lambda values.
@@ -96,13 +112,34 @@ function getMarketOutcome(h, a, marketName) {
 
 
 /**
+ * Calculates the probability of specific scores up to a max number of goals.
+ * @param {number} lambdaHome - The average expected goals for the home team.
+ * @param {number} lambdaAway - The average expected goals for the away team.
+ * @param {number} maxGoals - The maximum number of goals to calculate for each team.
+ * @returns {object} An object where keys are scores "h-a" and values are probabilities.
+ */
+function calculateScoreProbabilities(lambdaHome, lambdaAway, maxGoals = 4) {
+    const scoreProbabilities = {};
+    for (let h = 0; h <= maxGoals; h++) {
+        for (let a = 0; a <= maxGoals; a++) {
+            const homeProb = poissonProbability(h, lambdaHome);
+            const awayProb = poissonProbability(a, lambdaAway);
+            const scoreProb = homeProb * awayProb;
+            scoreProbabilities[`${h}-${a}`] = scoreProb * 100; // Store as percentage
+        }
+    }
+    return scoreProbabilities;
+}
+
+
+/**
  * Calculates outcome probabilities for a football match using a Monte Carlo simulation
- * based on a Poisson distribution of goals.
+ * and direct calculation for specific scores.
  * @param {object} homeTeamStats - The home team's stats, requires { home_xg_for, home_xg_against, home_games }.
  * @param {object} awayTeamStats - The away team's stats, requires { away_xg_for, away_xg_against, away_games }.
  * @param {Array<object>} markets - The oddsData array containing market definitions.
  * @param {number} [simulations=10000] - The number of Monte Carlo simulations to run.
- * @returns {object} An object mapping market names to their calculated {win, push, loss} probabilities.
+ * @returns {{marketProbabilities: object, scoreProbabilities: object}} An object containing both market and score probabilities.
  */
 function calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, markets, simulations = 10000) {
     const homeAttack = parseFloat(homeTeamStats.home_xg_for) / homeTeamStats.home_games;
@@ -115,10 +152,10 @@ function calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, markets, si
 
     if (isNaN(lambdaHome) || isNaN(lambdaAway)) {
         console.error("Failed to calculate lambda values. Check input stats.");
-        return {};
+        return { marketProbabilities: {}, scoreProbabilities: {} };
     }
 
-    // 1. Run the Monte Carlo simulation
+    // --- Market Probabilities (Monte Carlo) ---
     const simulatedScores = [];
     for (let i = 0; i < simulations; i++) {
         const homeGoals = generatePoissonRandom(lambdaHome);
@@ -127,7 +164,6 @@ function calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, markets, si
     }
 
     const marketProbabilities = {};
-    // 2. For each market, count the outcomes from the simulation results
     for (const market of markets) {
         const counts = { win: 0, push: 0, loss: 0 };
         
@@ -142,15 +178,17 @@ function calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, markets, si
         
         counts.loss = simulations - counts.win - counts.push;
 
-        // Convert counts to percentage and store
         marketProbabilities[market.name] = {
             win: (counts.win / simulations) * 100,
             push: (counts.push / simulations) * 100,
             loss: (counts.loss / simulations) * 100,
         };
     }
+    
+    // --- Score Probabilities (Direct Calculation) ---
+    const scoreProbabilities = calculateScoreProbabilities(lambdaHome, lambdaAway, 4);
 
-    return marketProbabilities;
+    return { marketProbabilities, scoreProbabilities };
 }
 
 module.exports = { calculateOutcomeProbabilities };

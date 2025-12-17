@@ -7,6 +7,7 @@ const { getTimestampForDate, getFbrefDateString, getStartOfDayTimestampSeconds, 
 const { generateFinalPrompt } = require('./prompt');
 const { calculateOutcomeProbabilities } = require('../utils/poisson');
 const { oddsData } = require('../services/database');
+const { scrapeMatchesByDate, scrapeH2H, scrapeWebsite } = require('../services/parser');
 
 
 const setupHandlers = (bot, conversationState) => {
@@ -111,19 +112,17 @@ ${JSON.stringify(performanceData, null, 2)}
                     away_games: awayPerf.length
                 };
 
-                console.log("--- Poisson Inputs ---", { homeTeamStats, awayTeamStats });
-
-                const marketProbabilities = calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, oddsData);
-
-                console.log("--- Poisson Output ---", marketProbabilities);
+                const { marketProbabilities, scoreProbabilities } = calculateOutcomeProbabilities(homeTeamStats, awayTeamStats, oddsData);
 
                 state.poissonProbabilities = marketProbabilities;
+                state.poissonScoreProbabilities = scoreProbabilities; // Store score probabilities
                 await bot.sendMessage(chatId, "✅ Успешно! Вероятности по Пуассону рассчитаны.");
 
             } catch (e) {
                 console.error("Ошибка при расчете вероятностей по Пуассону:", e);
                 await bot.sendMessage(chatId, `⚠️ Произошла ошибка при расчете вероятностей по Пуассону: ${e.message}`);
                 state.poissonProbabilities = {}; // Ensure it's an empty object on failure
+                state.poissonScoreProbabilities = {}; // Also initialize this
             }
             // --- END POISSON CALCULATION ---
 
@@ -137,8 +136,6 @@ ${JSON.stringify(performanceData, null, 2)}
                     getStatshubPlayerPerformance(homeTeam.id, homeTournamentId, fixtureId),
                     getStatshubPlayerPerformance(awayTeam.id, awayTournamentId, fixtureId)
                 ]);
-
-                console.log(homePlayerPerf)
 
                 const processPlayerData = (playerData) => {
                     if (!playerData || !playerData.data || !playerData.events || playerData.events.length === 0) {
@@ -302,7 +299,6 @@ ${cleanedFacts.join('\n')}
                     const h2hRaw = matchData["27"] && matchData["27"]["7"] ? matchData["27"]["7"] : [];
                     if (h2hRaw.length > 0) {
                         state.h2hData = h2hRaw.map(el => ({ homeTeam: el["7"], homeGoals: el["10"], awayTeam: el["15"], awayGoals: el["18"] }));
-                        console.log(state.h2hData)
                     }
                     await bot.sendMessage(chatId, `✅ Успешно! Доп. данные (погода, факты, H2H) получены.`);
                 } else {
@@ -436,19 +432,7 @@ ${cleanedFacts.join('\n')}
 
 
 
-            if (data.startsWith('date_')) {
-
-
-
-
-
-                const dayOffset = parseInt(data.split('_')[1], 10);
-
-
-
-
-
-                const dayName = ['сегодня', 'завтра', 'послезавтра'][dayOffset] || `дату со смещением ${dayOffset} дней`;
+                        if (data.startsWith('date_')) {
 
 
 
@@ -460,13 +444,13 @@ ${cleanedFacts.join('\n')}
 
 
 
-                await bot.answerCallbackQuery(callbackQuery.id);
+    
 
 
 
 
 
-                await bot.sendMessage(chatId, `Идет поиск матчей на ${dayName}...`);
+            
 
 
 
@@ -478,13 +462,247 @@ ${cleanedFacts.join('\n')}
 
 
 
-                try {
+    
 
 
 
 
 
-                    const events = await getStatshubEvents(getStartOfDayTimestampSeconds(dayOffset), getEndOfDayTimestampSeconds(dayOffset));
+                            const dayOffset = parseInt(data.split('_')[1], 10);
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                            const dayName = ['сегодня', 'завтра', 'послезавтра'][dayOffset] || `дату со смещением ${dayOffset} дней`;
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+            
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                            await bot.answerCallbackQuery(callbackQuery.id);
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                            await bot.sendMessage(chatId, `Идет поиск матчей на ${dayName}...`);
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+            
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                            try {
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                                const fbrefDate = getFbrefDateString(dayOffset);
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                                await bot.sendMessage(chatId, `▶️ Запускаю парсинг матчей с Fbref.com на ${fbrefDate}...`);
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                                const fbrefMatches = await scrapeMatchesByDate(fbrefDate);
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                                state.fbrefMatches = fbrefMatches;
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                                await bot.sendMessage(chatId, `✅ Успешно! ${fbrefMatches.length} лиг с матчами получены с Fbref.com.`);
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                                
+
+
+
+
+
+    
+
+
+
+
+
+    
+
+
+
+
+
+                                const events = await getStatshubEvents(getStartOfDayTimestampSeconds(dayOffset), getEndOfDayTimestampSeconds(dayOffset));
 
 
 
@@ -688,31 +906,961 @@ ${cleanedFacts.join('\n')}
 
 
 
-                state.match = `${selectedMatch.homeTeam} vs ${selectedMatch.awayTeam} (${selectedMatch.tournament})`;
+                                state.match = `${selectedMatch.homeTeam} vs ${selectedMatch.awayTeam} (${selectedMatch.tournament})`;
 
 
 
 
 
-                state.statshubMatchInfo = { homeTeam: { id: selectedMatch.homeTeamId, name: selectedMatch.homeTeam }, awayTeam: { id: selectedMatch.awayTeamId, name: selectedMatch.awayTeam } };
+                                state.statshubMatchInfo = { homeTeam: { id: selectedMatch.homeTeamId, name: selectedMatch.homeTeam }, awayTeam: { id: selectedMatch.awayTeamId, name: selectedMatch.awayTeam } };
 
 
 
 
 
-    
+                
 
 
 
 
 
-                await bot.sendMessage(chatId, `Вы выбрали матч: ${state.match}.`);
+                                await bot.sendMessage(chatId, `Вы выбрали матч: ${state.match}.`);
 
 
 
 
 
-                await bot.sendMessage(chatId, "▶️ Получение списка турниров для команд...");
+                
+
+
+
+
+
+                                // Find the corresponding match from fbref.com data using AI
+
+
+
+
+
+                                if (state.fbrefMatches && state.fbrefMatches.length > 0) {
+
+
+
+
+
+                                    await bot.sendMessage(chatId, "▶️ ИИ ищет соответствующий матч в данных с Fbref.com...");
+
+
+
+
+
+                                                                        const fbrefPrompt = `
+
+
+
+
+
+                                                                            Ты - умный ассистент по обработке данных. Тебе предоставлен JSON массив с данными о футбольных матчах, полученными с сайта fbref.com.
+
+
+
+
+
+                                                                            Вот эти данные:
+
+
+
+
+
+                                                                            \`\`\`json
+
+
+
+
+
+                                                                            ${JSON.stringify(state.fbrefMatches, null, 2)}
+
+
+
+
+
+                                                                            \`\`\`
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                            Также тебе дано название матча, выбранного пользователем: "${state.match}". Названия команд в этом названии могут немного отличаться от тех, что в JSON.
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                            Твоя задача - найти в JSON массиве ОДИН объект, который наиболее точно соответствует выбранному матчу. Сравнивай названия команд ("homeTeam", "awayTeam") из JSON с названиями из "${state.match}".
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                            КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:
+
+
+
+
+
+                                                                            1.  Твой ответ должен быть ТОЛЬКО JSON объектом найденного матча.
+
+
+
+
+
+                                                                            2.  **ЗАПРЕЩЕНО** добавлять любые объяснения, комментарии или форматирование вроде \`\`\`json. Просто верни чистый JSON.
+
+
+
+
+
+                                                                            3.  Если матч не найден, верни пустой JSON объект: {}.
+
+
+
+
+
+                                                                        `;
+
+
+
+
+
+                                                        try {
+
+
+
+
+
+                                                            const aiResponse = await getPrediction(fbrefPrompt);
+
+
+
+
+
+                                                            // Clean the response from the AI
+
+
+
+
+
+                                                            const cleanedResponse = aiResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+
+
+
+
+
+                                                            const fbrefMatchObject = JSON.parse(cleanedResponse);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                    if (Object.keys(fbrefMatchObject).length > 0) {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        console.log('Найденный ИИ объект матча с Fbref:', fbrefMatchObject);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        await bot.sendMessage(chatId, "✅ ИИ успешно нашел матч! Результат выведен в консоль.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        // Now, scrape H2H data
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        const matchData = fbrefMatchObject.matches && fbrefMatchObject.matches[0];
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                if (matchData && matchData.h2hUrl) {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    await bot.sendMessage(chatId, "▶️ Запускаю парсинг истории личных встреч (H2H)...");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    const fullH2hUrl = `https://fbref.com${matchData.h2hUrl}`;
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    try {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                                                            const h2hHistory = await scrapeH2H(fullH2hUrl);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                                                            state.fbrefH2hData = h2hHistory; // Store in state
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                                                            console.log('Результат парсинга H2H:', h2hHistory);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                                                            await bot.sendMessage(chatId, "✅ Успешно! Данные H2H выведены в консоль.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    } catch (h2hError) {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        console.error("Ошибка при парсинге H2H:", h2hError);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        await bot.sendMessage(chatId, "❌ Произошла ошибка при парсинге H2H.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    }
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                } else {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    console.log("H2H URL не найден в объекте матча от ИИ.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    await bot.sendMessage(chatId, "⚠️ H2H URL не найден, парсинг невозможен.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                            
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                }
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                // NEW: Scrape team stats
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                if (matchData && matchData.homeTeamUrl && matchData.awayTeamUrl) {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    try {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        await bot.sendMessage(chatId, `▶️ Запускаю парсинг статистики для команды ${matchData.homeTeam}...`);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        const homeStats = await scrapeWebsite(`https://fbref.com${matchData.homeTeamUrl}`);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        state.homeTeamFbrefStats = homeStats;
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        await bot.sendMessage(chatId, `✅ Успешно! Статистика для ${matchData.homeTeam} получена.`);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        await bot.sendMessage(chatId, `▶️ Запускаю парсинг статистики для команды ${matchData.awayTeam}...`);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        const awayStats = await scrapeWebsite(`https://fbref.com${matchData.awayTeamUrl}`);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        state.awayTeamFbrefStats = awayStats;
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        await bot.sendMessage(chatId, `✅ Успешно! Статистика для ${matchData.awayTeam} получена.`);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    } catch (teamStatError) {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        console.error("Ошибка при парсинге статистики команд:", teamStatError);
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                        await bot.sendMessage(chatId, "❌ Произошла ошибка при парсинге статистики команд.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    }
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                } else {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    console.log("URLы команд не найдены, парсинг статистики невозможен.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                    await bot.sendMessage(chatId, "⚠️ URLы команд не найдены, парсинг статистики невозможен.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                                                                                                                }
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                    } else {
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        console.log('ИИ не смог найти соответствующий матч в данных с Fbref.');
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                        await bot.sendMessage(chatId, "⚠️ ИИ не смог найти матч в данных с Fbref.com.");
+
+
+
+
+
+                                    
+
+
+
+
+
+                                                                                    }
+
+
+
+
+
+                                                        } catch (e) {
+
+
+
+
+
+                                                            console.error("Ошибка при обработке ответа ИИ для поиска матча Fbref:", e);
+
+
+
+
+
+                                                            await bot.sendMessage(chatId, "❌ Произошла ошибка при поиске матча в данных Fbref с помощью ИИ.");
+
+
+
+
+
+                                                        }
+
+
+
+
+
+                                }
+
+
+
+
+
+                
+
+
+
+
+
+                                await bot.sendMessage(chatId, "▶️ Получение списка турниров для команд...");
 
 
 
@@ -1234,13 +2382,19 @@ ${cleanedFacts.join('\n')}
 
 
 
-                await bot.sendMessage(chatId, `Генерирую промпт для типа "${promptType === 'single' ? 'Ординар' : 'Экспресс'}"...`);
+                                await bot.sendMessage(chatId, `Генерирую промпт для типа "${promptType === 'single' ? 'Ординар' : 'Экспресс'}"...`);
 
 
 
 
 
-                const finalPromptText = await generateFinalPrompt(promptType, state);
+    
+
+
+
+
+
+                                const finalPromptText = await generateFinalPrompt(promptType, state, state.fbrefH2hData);
 
 
 

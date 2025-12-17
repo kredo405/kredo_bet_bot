@@ -19,9 +19,8 @@ const formatTimestamp = (timestamp) => {
   return `${day}.${month}.${year} ${hours}:${minutes}`;
 };
 
-const formatOddsHistory = (apiData, oddsMetadata, poissonProbabilities) => {
+const formatOddsHistory = (apiData, oddsMetadata) => {
   if (!apiData) return '';
-  if (!poissonProbabilities) poissonProbabilities = {}; // Guard against undefined
 
   // --- Step 1: Create lookup map ---
   const oddIdToName = new Map();
@@ -30,7 +29,7 @@ const formatOddsHistory = (apiData, oddsMetadata, poissonProbabilities) => {
   });
 
   // --- Step 2: Format the final output string ---
-  let resultString = 'ДВИЖЕНИЕ КОЭФФИЦИЕНТОВ [Вес: Очень высокий]: Доверяй Fair кэфу в данных, он рассчитан на базе xG модели По Пуассону и методу Монтекарло, используй его как опорную точку\n';
+  let resultString = 'ДВИЖЕНИЕ КОЭФФИЦИЕНТОВ [Вес: Очень высокий]:\n';
   let hasFilteredOdds = false;
 
   const sortedOddIds = Object.keys(apiData).sort((a, b) => {
@@ -66,25 +65,6 @@ const formatOddsHistory = (apiData, oddsMetadata, poissonProbabilities) => {
 
           // Formatting
           let line = `  - ${oddName}: Открытие ${initialOdd.toFixed(2)} -> Текущий ${currentOdd.toFixed(2)} (${direction} ${Math.abs(percentChange).toFixed(0)}%${isSignificant})`;
-
-          // Append fair probability and fair coefficient if calculated via Poisson
-          const marketProbs = poissonProbabilities[oddName];
-          if (marketProbs && marketProbs.win > 0) {
-              const winProb = marketProbs.win;
-              const pushProb = marketProbs.push;
-              let fairCoeff;
-
-              // If there's a significant chance of a push, adjust the fair odds calculation.
-              if (pushProb > 0.01) {
-                  // Fair odd for markets with a push = (1 - P(Push)) / P(Win)
-                  fairCoeff = (100 - pushProb) / winProb;
-              } else {
-                  // Standard fair odd for markets without a push
-                  fairCoeff = 100 / winProb;
-              }
-              
-              line += `, вероятность: ${winProb.toFixed(0)}% (fair кэф: ${fairCoeff.toFixed(2)})`;
-          }
 
           resultString += line + '\n';
       }
