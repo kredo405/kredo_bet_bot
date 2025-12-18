@@ -117,4 +117,3 @@ export const getStatshubPlayerPerformance = async (teamId, tournamentId, fixture
         return null;
       }
     };
-    

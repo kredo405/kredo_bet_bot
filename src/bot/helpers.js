@@ -20,17 +20,19 @@ const formatTimestamp = (timestamp) => {
 };
 
 const formatOddsHistory = (apiData, oddsMetadata) => {
-  if (!apiData) return '';
+  if (!apiData) return [];
 
-  // --- Step 1: Create lookup map ---
   const oddIdToName = new Map();
   oddsMetadata.forEach(item => {
       oddIdToName.set(item.odd, item.name);
   });
 
-  // --- Step 2: Format the final output string ---
-  let resultString = 'ДВИЖЕНИЕ КОЭФФИЦИЕНТОВ [Вес: Очень высокий]:\n';
-  let hasFilteredOdds = false;
+  const allowedOutcomes = new Set([
+    'ОЗ Да', 'ОЗ Нет', 'ТБ 2.5', 'ТМ 2.5', 
+    'Победа 1', 'Победа 2', 'Ничья', 'Ф1 0', 'Ф2 0'
+  ]);
+
+  const structuredOdds = [];
 
   const sortedOddIds = Object.keys(apiData).sort((a, b) => {
     const nameA = oddIdToName.get(a) || '';
@@ -41,7 +43,9 @@ const formatOddsHistory = (apiData, oddsMetadata) => {
   for (const oddId of sortedOddIds) {
       if (Object.hasOwnProperty.call(apiData, oddId)) {
           const oddName = oddIdToName.get(oddId);
-          if (!oddName) continue;
+          if (!oddName || !allowedOutcomes.has(oddName)) {
+              continue;
+          }
 
           const history = apiData[oddId];
           if (!history || history.length < 2) continue;
@@ -50,27 +54,20 @@ const formatOddsHistory = (apiData, oddsMetadata) => {
           const currentOdd = sortedHistory[0][1];
           const initialOdd = sortedHistory[sortedHistory.length - 1][1];
 
-          // Filtering by current coefficient
-          if (currentOdd < 1.4 || currentOdd > 3.3) {
-              continue;
-          }
-
-          hasFilteredOdds = true;
-
-          // Calculation
           const diff = currentOdd - initialOdd;
           const percentChange = (diff / initialOdd) * 100;
-          const direction = percentChange < 0 ? 'Падение' : 'Рост';
-          const isSignificant = Math.abs(percentChange) > 10 ? ', прогруз' : '';
 
-          // Formatting
-          let line = `  - ${oddName}: Открытие ${initialOdd.toFixed(2)} -> Текущий ${currentOdd.toFixed(2)} (${direction} ${Math.abs(percentChange).toFixed(0)}%${isSignificant})`;
-
-          resultString += line + '\n';
+          structuredOdds.push({
+            name: oddName,
+            initial: initialOdd.toFixed(2),
+            current: currentOdd.toFixed(2),
+            change: percentChange.toFixed(0),
+            isSignificant: Math.abs(percentChange) > 10,
+          });
       }
   }
 
-  return hasFilteredOdds ? resultString : '';
+  return structuredOdds;
 };
 
 module.exports = {
