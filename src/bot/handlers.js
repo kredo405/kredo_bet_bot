@@ -480,7 +480,7 @@ ${cleanedFacts.join('\n')}
                         await bot.sendMessage(chatId, "✅ ИИ успешно нашел матч! Результат выведен в консоль.");
 
                         // Now, scrape H2H data
-                        const matchData = fbrefMatchObject; // FIX: The AI returns the match object directly
+                        const matchData = fbrefMatchObject.matches && fbrefMatchObject.matches[0] ? fbrefMatchObject.matches[0] : fbrefMatchObject;
                         if (matchData && matchData.h2hUrl) {
 
                             await bot.sendMessage(chatId, "▶️ Запускаю парсинг истории личных встреч (H2H)...");
@@ -831,7 +831,7 @@ ${cleanedFacts.join('\n')}
                                 scores: contributingScores,
                             };
                         }).filter(res => res.coverageN > 0 && res.valueScore > 0 && parseFloat(res.odd) > 1.3)
-                          .sort((a, b) => b.valueScore - a.valueScore);
+                          .sort((a, b) => b.coverageN - a.coverageN);
 
                         let formattedOutput = `📊 *Результаты анализа по Value Score (Ценности):*\n\n`;
                         if (results.length === 0) {
@@ -855,83 +855,29 @@ ${cleanedFacts.join('\n')}
                         return { formattedText: formattedOutput, rawResults: results };
                     };
 
-                    const generateRecommendations = (results, state, uniqueScoresTotal) => {
-                        let recommendations = { optimal: null, reliable: null, risky: null };
-                        const usedIndices = new Set();
-                    
-                        // 1. Find "Оптимальный Value"
-                        for (let i = 0; i < results.length; i++) {
-                            const res = results[i];
-                            const odd = parseFloat(res.odd);
-                            if (odd > 1.7 && res.coverageN > 50) {
-                                recommendations.optimal = res;
-                                usedIndices.add(i);
-                                break;
-                            }
-                        }
-                    
-                        // 2. Find "Надежный выбор"
-                        let reliableCandidate = null;
-                        let maxReliableScore = -1;
-                        for (let i = 0; i < results.length; i++) {
-                            if (usedIndices.has(i)) continue;
-                            const res = results[i];
-                            const odd = parseFloat(res.odd);
-                            if (odd >= 1.4 && odd <= 1.7 && res.coverageN > 50 && res.valueScore > 1.0) {
-                                const score = res.coverageN + (res.valueScore * 20);
-                                if (score > maxReliableScore) {
-                                    reliableCandidate = res;
-                                    maxReliableScore = score;
-                                }
-                            }
-                        }
-                        if (reliableCandidate) {
-                            recommendations.reliable = reliableCandidate;
-                            usedIndices.add(results.indexOf(reliableCandidate));
-                        }
-                    
-                        // 3. Find "Рискованный, но ценный"
-                        for (let i = 0; i < results.length; i++) {
-                            if (usedIndices.has(i)) continue;
-                            const res = results[i];
-                            const odd = parseFloat(res.odd);
-                            if (odd > 2.2 && res.valueScore > 1.1 && res.coverageN > 40) {
-                                recommendations.risky = res;
-                                usedIndices.add(i);
-                                break;
-                            }
-                        }
-                    
-                        // 4. Format the output
+                    const generateRecommendations = (results, state) => {
+                        // The 'results' array is already sorted by valueScore in descending order.
+                        const top3Results = results.slice(0, 3);
+
                         const date = new Date();
                         date.setDate(date.getDate() + state.dayOffset);
                         const dateString = date.toLocaleDateString('ru-RU');
 
-                        let output = `🤖 Рекомендации по ставкам:\nМатч: ${state.match}\nДата: ${dateString}\n\n`;
-                        let found = false;
-                    
-                        if (recommendations.optimal) {
-                            found = true;
-                            const r = recommendations.optimal;
-                            output += `Оптимальный Валуй 💎\n${r.name} (Кэф: ${r.odd}, Вероятность(T5/T${uniqueScoresTotal}): ${r.coverage5.toFixed(0)}%/${r.coverageN.toFixed(0)}%, Value: ${r.valueScore.toFixed(2)})\n\n`;
+                        let output = `*🤖 Рекомендации по ставкам:*\nМатч: *${state.match}*\nДата: ${dateString}\n\n`;
+
+                        if (top3Results.length === 0) {
+                            return "Не найдено ценных исходов для формирования рекомендаций.";
                         }
-                    
-                        if (recommendations.reliable) {
-                            found = true;
-                            const r = recommendations.reliable;
-                            output += `Надежный выбор ✅\n${r.name} (Кэф: ${r.odd}, Вероятность(T5/T${uniqueScoresTotal}): ${r.coverage5.toFixed(0)}%/${r.coverageN.toFixed(0)}%, Value: ${r.valueScore.toFixed(2)})\n\n`;
-                        }
-                    
-                        if (recommendations.risky) {
-                            found = true;
-                            const r = recommendations.risky;
-                            output += `Рискованный, но ценный 🚀\n${r.name} (Кэф: ${r.odd}, Вероятность(T5/T${uniqueScoresTotal}): ${r.coverage5.toFixed(0)}%/${r.coverageN.toFixed(0)}%, Value: ${r.valueScore.toFixed(2)})\n\n`;
-                        }
-                    
-                        if (!found) {
-                            return "Не удалось подобрать однозначных рекомендаций по заданным критериям.";
-                        }
-                    
+
+                        const medals = ['🥇', '🥈', '🥉'];
+
+                        top3Results.forEach((res, index) => {
+                            output += `${medals[index]} *Место ${index + 1}:* ${res.name}\n`;
+                            output += `   - *Кэф:* ${res.odd}\n`;
+                            output += `   - *Value Score:* ${res.valueScore.toFixed(2)}\n`;
+                            output += `   - *Уверенность ИИ:* ${res.coverageN.toFixed(0)}%\n\n`;
+                        });
+
                         return output;
                     };
 
@@ -941,9 +887,9 @@ ${cleanedFacts.join('\n')}
                     await bot.sendMessage(chatId, formattedText, { parse_mode: 'Markdown' });
 
                     if (rawResults.length > 0) {
-                        const recommendationsText = generateRecommendations(rawResults, state, uniqueScoreCount);
+                        const recommendationsText = generateRecommendations(rawResults, state);
                         // Send recommendations as plain text to avoid parsing errors
-                        await bot.sendMessage(chatId, recommendationsText);
+                        await bot.sendMessage(chatId, recommendationsText, { parse_mode: 'Markdown' });
                     }
 
                 } catch (e) {
